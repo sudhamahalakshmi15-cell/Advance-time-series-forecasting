@@ -1,0 +1,133 @@
+import numpy as np
+import pandas as pd
+
+np.random.seed(42)
+
+n_steps = 2500
+t = np.arange(n_steps)
+
+data = pd.DataFrame({
+    "feature_1": np.sin(0.02 * t),
+    "feature_2": np.cos(0.015 * t),
+    "feature_3": np.sin(0.01 * t + 1),
+    "feature_4": np.cos(0.03 * t),
+    "feature_5": 0.5 * np.sin(0.02 * t) + 0.3 * np.cos(0.015 * t),
+})
+
+# Target depends on multiple features (correlated)
+data["target"] = (
+    0.4 * data["feature_1"] +
+    0.3 * data["feature_2"] +
+    0.2 * data["feature_5"]
+)
+
+# Add Gaussian noise
+data += np.random.normal(0, 0.05, data.shape)
+
+data.head()
+
+from sklearn.preprocessing import MinMaxScaler
+
+scaler = MinMaxScaler()
+scaled = scaler.fit_transform(data)
+def create_sequences(data, window=30):
+    X, y = [], []
+    for i in range(len(data) - window):
+        X.append(data[i:i+window, :-1])
+        y.append(data[i+window, -1])
+    return np.array(X), np.array(y)
+split = int(0.8 * len(X))
+X_train, X_test = X[:split], X[split:]
+y_train, y_test = y[:split], y[split:]
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, LSTM, Dense, Attention, Lambda
+
+inputs = Input(shape=(X.shape[1], X.shape[2]))
+
+lstm_out = LSTM(64, return_sequences=True)(inputs)
+
+attention_out = Attention()([lstm_out, lstm_out])
+
+# Fix: Wrap tf.reduce_mean in a Lambda layer
+context = Lambda(lambda x: tf.reduce_mean(x, axis=1))(attention_out)
+
+output = Dense(1)(context)
+
+attention_model = Model(inputs, output)
+attention_model.compile(optimizer="adam", loss="mse")
+
+attention_model.summary()
+attention_model.fit(
+    X_train, y_train,
+    epochs=15,
+    batch_size=32,
+    validation_split=0.1
+)
+from tensorflow.keras.models import Sequential
+
+lstm_model = Sequential([
+    LSTM(64, input_shape=(X.shape[1], X.shape[2])),
+    Dense(1)
+])
+
+lstm_model.compile(optimizer="adam", loss="mse")
+lstm_model.fit(X_train, y_train, epochs=15, batch_size=32)
+X, y = create_sequences(scaled)
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+sarimax = SARIMAX(
+    data["target"][:split],
+    order=(2,1,2),
+    seasonal_order=(1,0,1,50)
+).fit(disp=False)
+
+sarimax_pred = sarimax.forecast(len(y_test))
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import numpy as np
+
+def metrics(y_true, y_pred):
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    return rmse, mae, mape
+
+att_pred = attention_model.predict(X_test).flatten()
+lstm_pred = lstm_model.predict(X_test).flatten()
+
+results = pd.DataFrame({
+    "Model": ["SARIMAX", "LSTM", "Attention LSTM"],
+    "RMSE": [
+        *metrics(y_test, sarimax_pred)[0:1],
+        metrics(y_test, lstm_pred)[0],
+        metrics(y_test, att_pred)[0]
+    ],
+    "MAE": [
+        metrics(y_test, sarimax_pred)[1],
+        metrics(y_test, lstm_pred)[1],
+        metrics(y_test, att_pred)[1]
+    ],
+    "MAPE": [
+        metrics(y_test, sarimax_pred)[2],
+        metrics(y_test, lstm_pred)[2],
+        metrics(y_test, att_pred)[2]
+    ]
+})
+
+results
+attention_extractor = Model(
+    inputs=attention_model.input,
+    outputs=attention_model.layers[2].output
+)
+
+attention_weights = attention_extractor.predict(X_test[:1])
+
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(10,4))
+plt.plot(attention_weights[0,:,0])
+plt.title("Attention Weight Distribution Across Time Steps")
+plt.xlabel("Time Step")
+plt.ylabel("Importance")
+plt.show()
+
